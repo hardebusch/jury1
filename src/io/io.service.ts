@@ -127,12 +127,12 @@ export class IoService {
     }
 
     /**
-     * Attaches to a container's log stream and retrieves its standard output (stdout).
-     * Uses Docker's stream demultiplexer to correctly handle interleaved stdout/stderr streams.
-     * Logs any stderr output for debugging purposes but resolves only with stdout content.
+     * Attaches to a container's log stream and retrieves its combined standard output (stdout)
+     * and standard error (stderr). Uses Docker's stream demultiplexer to correctly handle
+     * interleaved stdout/stderr streams before combining them.
      *
      * @param container - The Docker container instance to fetch logs from.
-     * @returns A promise that resolves with the accumulated stdout string upon stream end,
+     * @returns A promise that resolves with the combined stdout and stderr string upon stream end,
      *          or rejects if there's an error attaching to or reading the log stream.
      */
     async getContainerOutput(container: Docker.Container): Promise<string> {
@@ -170,12 +170,11 @@ export class IoService {
                 });
 
                 stream.on('end', () => {
-                    // Optional: Check stderrData if errors should cause rejection
-                    // if (stderrData.trim()) {
-                    //     this.logger.warn(`[Container ${container.id}] Execution produced stderr output.`);
-                    //     // Potentially reject or include stderr in the result based on requirements
-                    // }
-                    resolve(stdoutData); // Resolve with the accumulated stdout data
+                    // Combine stdout and stderr before resolving
+                    // ToDo: This could be separated into different properties if needed (but would require changes in the calling code)
+                    // e.g., { stdout: stdoutData, stderr: stderrData }
+                    const combinedOutput = stdoutData + stderrData;
+                    resolve(combinedOutput);
                 });
 
                 stream.on('error', (error) => {
