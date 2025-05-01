@@ -1,4 +1,5 @@
 import { Inject, Injectable, LoggerService } from '@nestjs/common';
+import { PassThrough } from 'stream'; // Added import
 import * as Docker from 'dockerode';
 import { mkdirSync, readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
@@ -55,26 +56,6 @@ export class IoService {
         const base64regex = /^([0-9a-zA-Z+/]{4})*(([0-9a-zA-Z+/]{2}==)|([0-9a-zA-Z+/]{3}=))?$/;
 
         return base64regex.test(code);
-    }
-
-    /**
-     * Strips the first 8 characters from each line of the docker container logs (docker headers)
-     * @param { string } output - The logs of the docker container
-     * @returns { string } - The logs of the docker container without the docker headers
-     */
-    parseOutput(output: string): string {
-        const logLine = output.split('\n');
-        let result = '';
-
-        // Remove the first 8 characters from each line, add a new line (except for the last line)
-        logLine.forEach(element => {
-            element = element.slice(8);
-            if (element !== '') {
-                result += element + '\n';
-            }
-        });
-
-        return result;
     }
 
     /**
@@ -146,20 +127,61 @@ export class IoService {
     }
 
     /**
-     * Fetches the output from the given container
-     * @param { Docker.Container } container - The container to fetch the output from
-     * @returns { Promise<string> } - The output of the container
+     * Attaches to a container's log stream and retrieves its standard output (stdout).
+     * Uses Docker's stream demultiplexer to correctly handle interleaved stdout/stderr streams.
+     * Logs any stderr output for debugging purposes but resolves only with stdout content.
+     *
+     * @param container - The Docker container instance to fetch logs from.
+     * @returns A promise that resolves with the accumulated stdout string upon stream end,
+     *          or rejects if there's an error attaching to or reading the log stream.
      */
     async getContainerOutput(container: Docker.Container): Promise<string> {
         return new Promise<string>((resolve, reject) => {
             container.logs({ stdout: true, stderr: true, follow: true }, (err, stream) => {
                 if (err) {
+                    this.logger.error(`[Container ${container.id}] Error getting logs:`, err);
                     return reject(err);
                 }
 
-                let data = '';
-                stream.on('data', chunk => data += this.parseOutput(chunk.toString('utf8')));
-                stream.on('end', () => resolve(data));
+                let stdoutData = '';
+                let stderrData = ''; // Capture stderr for potential debugging
+
+                // Create streams for stdout and stderr
+                const stdout = new PassThrough();
+                const stderr = new PassThrough();
+
+                // Demultiplex the stream from Docker
+                // Docker sends stdout and stderr interleaved with an 8-byte header
+                // indicating the stream type (1 for stdout, 2 for stderr) and length.
+                // demuxStream handles parsing this header and splitting the streams.
+                this.docker.modem.demuxStream(stream, stdout, stderr);
+
+                stdout.on('data', (chunk) => {
+                    stdoutData += chunk.toString('utf8');
+                });
+
+                stderr.on('data', (chunk) => {
+                    // Log stderr for debugging purposes
+                    const stderrChunk = chunk.toString('utf8').trim();
+                    if (stderrChunk) { // Avoid logging empty lines
+                        // this.logger.debug(`[Container ${container.id}] stderr: ${stderrChunk}`); // Commented out debug log
+                        stderrData += stderrChunk + '\n'; // Store it if needed later (e.g., for error reporting)
+                    }
+                });
+
+                stream.on('end', () => {
+                    // Optional: Check stderrData if errors should cause rejection
+                    // if (stderrData.trim()) {
+                    //     this.logger.warn(`[Container ${container.id}] Execution produced stderr output.`);
+                    //     // Potentially reject or include stderr in the result based on requirements
+                    // }
+                    resolve(stdoutData); // Resolve with the accumulated stdout data
+                });
+
+                stream.on('error', (error) => {
+                    this.logger.error(`[Container ${container.id}] Log stream error:`, error);
+                    reject(error); // Reject promise if the stream errors
+                });
             });
         });
     }
